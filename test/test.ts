@@ -68,6 +68,16 @@ async function main() {
     console.log("Todos:", data);
   }
 
+  const refresh = await auth.refreshSession();
+  console.log("refresh:", refresh);
+
+  const fetch2 = await auth.get("/v1/check/");
+  if (fetch2.error) {
+    console.error("API error:", error);
+  } else {
+    console.log("Todos:", fetch2.data);
+  }
+
   const logout = await auth.logout();
   console.log("logout:", logout);
 }
