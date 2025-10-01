@@ -1,0 +1,32 @@
+{
+  "name": "@your-scope/gotrue-wrapper",
+  "version": "0.1.0",
+  "description": "A lightweight Conga wrapper with API helper",
+  "main": "dist/index.cjs",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --dts",
+    "test": "npx ts-node test/test.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "gotrue",
+    "auth",
+    "jwt",
+    "typescript",
+    "ogna"
+  ],
+  "author": "Santiago Velez",
+  "license": "MIT",
+  "devDependencies": {
+    "tsup": "^7.0.0",
+    "typescript": "^5.0.0"
+  }
+}
