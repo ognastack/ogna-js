@@ -32,12 +32,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yourusername/your-library-name.git"
+    "url": "git+https://github.com/ognastack/ogna-js.git"
   },
   "bugs": {
-    "url": "https://github.com/yourusername/your-library-name/issues"
+    "url": "https://github.com/ognastack/ogna-js/issues"
   },
-  "homepage": "https://github.com/yourusername/your-library-name#readme",
+  "homepage": "https://github.com/ognastack/ogna-js",
   "devDependencies": {
     "@eslint/js": "^8.57.1",
     "@typescript-eslint/eslint-plugin": "^8.51.0",
