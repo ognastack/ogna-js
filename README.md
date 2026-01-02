@@ -17,7 +17,7 @@ A lightweight Typescript library for accesing Ognastack features.
 ## Installation
 
 ```bash
-npm install @your-scope/gotrue-wrapper
+npm install @ogna/js
 ```
 
 ---
@@ -31,7 +31,7 @@ Wrap your app in the `AuthProvider`, passing the ognastack base URL
 ```tsx
 // AuthProvider.tsx
 import React, { createContext, useContext, useMemo } from "react";
-import { OgnaClient } from "@your-scope/gotrue-wrapper";
+import { OgnaClient } from '@ogna/js';
 
 // context holds the client
 const OgnaContext = createContext<OgnaClient | undefined>(undefined);
