@@ -1,34 +1,32 @@
-# Ogna JS (GoTrue Auth Wrapper)
+# Ogna Javascript
 
-A lightweight TypeScript wrapper around [Netlify GoTrue](https://github.com/netlify/gotrue) that simplifies authentication and API requests in Ogna FrontEnd apps.
-
----
-
-## ✨ Features
-
-- 🔑 Login, signup, logout with GoTrue
-- 🔄 Automatic JWT refresh
-- 💾 Session persistence in `localStorage`
-- 🌐 Easy `GET`, `POST`, `PUT`, `DELETE` helpers that attach auth headers
-- ⚛️ React Context provider for seamless integration
+A lightweight Typescript library for accesing Ognastack features. 
 
 ---
 
-## 📦 Installation
+## Features
+
+- Authentication management: Login, signup, logout
+- Session persistence in `localStorage`
+- Easy `GET`, `POST`, `PUT`, `DELETE` helpers that attach auth headers
+- Storage featires to upload and download files
+
+
+---
+
+## Installation
 
 ```bash
 npm install @your-scope/gotrue-wrapper
-# or
-yarn add @your-scope/gotrue-wrapper
 ```
 
 ---
 
-## ⚡ Quick Start (React)
+## Quick Start (React)
 
 ### 1. Set up the `AuthProvider`
 
-Wrap your app in the `AuthProvider`, passing the Netlify Identity URL and your API base URL:
+Wrap your app in the `AuthProvider`, passing the ognastack base URL
 
 ```tsx
 // AuthProvider.tsx
@@ -36,26 +34,26 @@ import React, { createContext, useContext, useMemo } from "react";
 import { OgnaClient } from "@your-scope/gotrue-wrapper";
 
 // context holds the client
-const AuthContext = createContext<OgnaClient | undefined>(undefined);
+const OgnaContext = createContext<OgnaClient | undefined>(undefined);
 
-export const AuthProvider: React.FC<{
-  children: React.ReactNode;
-  baseUrl: string;
-}> = ({ children, baseUrl }) => {
-  // create only once
-  const auth = useMemo(() => new OgnaClient(baseUrl), [baseUrl]);
-
-  return <OgnaClient.Provider value={auth}>{children}</OgnaClient.Provider>;
-};
-
-// easy hook
 export const useAuth = (): OgnaClient => {
-  const ctx = useContext(OgnaClient);
+  const ctx = useContext(OgnaContext);
   if (!ctx) {
-    throw new Error("useAuth must be used within an AuthProvider");
+    throw new Error("OgnaContext must be used within an AuthProvider");
   }
   return ctx;
 };
+
+export const OgnaAppContainer = ({ children, baseUrl }: OgnaAppProps) => {
+  const auth = useMemo(() => new OgnaClient(baseUrl), [baseUrl]);
+  return (
+    <OgnaContext.Provider value={auth}>
+      {children}
+    </OgnaContext.Provider>
+  );
+};
+
+
 ```
 
 ---
@@ -68,7 +66,7 @@ import React, { useState } from "react";
 import { useAuth } from "@your-scope/gotrue-wrapper/react";
 
 export default function Todos() {
-  const auth = useAuth(); // full AuthClient instance
+  const { client } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [todos, setTodos] = useState<any[]>([]);
@@ -76,19 +74,19 @@ export default function Todos() {
 
   const handleLogin = async () => {
     try {
-      await auth.login(email, password);
+      await client.auth.login(email, password);
     } catch (err: any) {
       setError(err.message);
     }
   };
 
   const loadTodos = async () => {
-    const { data, error } = await auth.get<any[]>("/todos");
+    const { data, error } = await client.auth.get<any[]>("/todos");
     if (error) setError(error.message);
     if (data) setTodos(data);
   };
 
-  if (!auth.getUser()) {
+  if (!client.auth.getUser()) {
     return (
       <div>
         <h2>Login</h2>
@@ -111,7 +109,7 @@ export default function Todos() {
 
   return (
     <div>
-      <h2>Welcome {auth.getUser()?.email}</h2>
+      <h2>Welcome {client.auth.getUser()?.email}</h2>
       <button onClick={() => auth.logout()}>Logout</button>
       <button onClick={loadTodos}>Load Todos</button>
       <ul>
@@ -123,30 +121,9 @@ export default function Todos() {
   );
 }
 ```
-
 ---
 
-## 📚 API (AuthClient)
-
-```ts
-const auth = new AuthClient(identityUrl, apiBaseUrl);
-
-// Authentication
-await auth.signup(email, password);
-await auth.login(email, password);
-await auth.logout();
-const user = auth.getUser();
-
-// API calls with auth headers
-const { data, error } = await auth.get("/todos");
-const { data, error } = await auth.post("/todos", { title: "New task" });
-```
-
-Each API call returns `{ data, error }` instead of throwing.
-
----
-
-## 🛠 Development
+## Development
 
 ```bash
 # Build
@@ -158,6 +135,6 @@ cd example && npm install && npm start
 
 ---
 
-## 📄 License
+## License
 
-MIT © Your Name
+MIT
