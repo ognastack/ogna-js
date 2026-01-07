@@ -3,7 +3,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "A lightweight Ogna wrapper with API helper",
   "main": "dist/index.cjs.ts",
   "module": "dist/index.esm.ts",
