@@ -351,6 +351,14 @@ export class OgnaClient {
     );
   }
 
+  async patch<T = unknown>(path: string, body: unknown): Promise<ApiResult<T>> {
+    return this.auth["request"]<T>(
+      "PATCH",
+      `${this.baseUrl}/api/${path.replace(/^\/+/, "")}`,
+      body
+    );
+  }  
+
   async delete<T = unknown>(path: string): Promise<ApiResult<T>> {
     return this.auth["request"]<T>(
       "DELETE",
