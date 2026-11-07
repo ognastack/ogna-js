@@ -3,11 +3,20 @@
   "publishConfig": {
     "access": "public"
   },
-  "version": "0.0.4",
-  "description": "A lightweight Ogna wrapper with API helper",
-  "main": "dist/index.cjs.ts",
-  "module": "dist/index.esm.ts",
-  "types": "dist/index.d.ts",
+  "version": "0.1.0",
+  "description": "Official lightweight JavaScript & TypeScript SDK for OgnaStack (Auth, Storage, and API Gateway)",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs",
+      "default": "./dist/index.mjs"
+    }
+  },
+  "sideEffects": false,
   "files": [
     "dist",
     "README.md",
@@ -15,20 +24,26 @@
   ],
   "scripts": {
     "build": "npm run clean && npm run build:cjs && npm run build:esm && npm run build:types",
-    "build:cjs": "esbuild src/index.ts --bundle --platform=node --target=node14 --outfile=dist/index.cjs.ts --format=cjs",
-    "build:esm": "esbuild src/index.ts --bundle --platform=neutral --target=es2020 --outfile=dist/index.esm.ts --format=esm",
+    "build:cjs": "esbuild src/index.ts --bundle --platform=neutral --target=es2020 --outfile=dist/index.cjs --format=cjs",
+    "build:esm": "esbuild src/index.ts --bundle --platform=neutral --target=es2020 --outfile=dist/index.mjs --format=esm",
     "build:types": "tsc --emitDeclarationOnly --declaration --declarationMap",
     "clean": "rm -rf dist",
-    "prepublishOnly": "npm run build",
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "prepublishOnly": "npm run lint && npm run build && npm test",
+    "test": "npm run build:cjs && node --test tests/*.test.cjs",
     "lint": "eslint 'src/*'",
     "format": "prettier --write \"src/**/*.{js,ts,json}\""
   },
   "keywords": [
-    "javascript",
-    "library"
+    "ognastack",
+    "ogna",
+    "sdk",
+    "auth",
+    "gotrue",
+    "storage",
+    "typescript",
+    "javascript"
   ],
-  "author": "Your Name <your.email@example.com>",
+  "author": "OgnaStack",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -52,6 +67,6 @@
     "typescript-eslint": "^8.51.0"
   },
   "engines": {
-    "node": ">=14.0.0"
+    "node": ">=18.0.0"
   }
 }
