@@ -3,7 +3,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Official lightweight JavaScript & TypeScript SDK for OgnaStack (Auth, Storage, and API Gateway)",
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",
@@ -38,7 +38,8 @@
     "ogna",
     "sdk",
     "auth",
-    "gotrue",
+    "oidc",
+    "zitadel",
     "storage",
     "typescript",
     "javascript"

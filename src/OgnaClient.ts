@@ -33,15 +33,28 @@ export interface HealthResponse {
   environment?: string;
 }
 
+/**
+ * The signed-in user, built from the OpenID Connect ID token / userinfo claims.
+ */
 export interface User {
+  /** Identity-provider user id (OIDC `sub`). Zitadel ids are numeric strings. */
   id: string;
-  email: string;
-  created_at: string;
-  updated_at: string;
-  aud?: string;
-  role?: string;
-  app_metadata?: Record<string, unknown>;
-  user_metadata?: Record<string, unknown>;
+  email?: string;
+  email_verified?: boolean;
+  name?: string;
+  given_name?: string;
+  family_name?: string;
+  preferred_username?: string;
+  picture?: string;
+  locale?: string;
+  /** Project role keys granted to the user (Zitadel `urn:zitadel:iam:org:project:roles`) */
+  roles?: string[];
+  /** Organization the user belongs to (Zitadel `urn:zitadel:iam:user:resourceowner:id`) */
+  org_id?: string;
+  /** Seconds since epoch, from the `updated_at` claim */
+  updated_at?: number;
+  /** All raw claims, for anything not mapped above */
+  claims?: Record<string, unknown>;
 }
 
 export type AuthError = {
@@ -55,11 +68,53 @@ export type AuthError = {
 
 export interface Session {
   access_token: string;
-  refresh_token: string;
+  /** Present when the `offline_access` scope was granted */
+  refresh_token?: string;
+  id_token?: string;
   expires_in: number;
   expires_at?: number;
   token_type: string;
+  scope?: string;
   user: User;
+}
+
+export interface AuthOptions {
+  /** OIDC issuer URL, e.g. "https://auth.example.com" (dev: "http://auth.localhost:8000") */
+  issuer?: string;
+  /** Client id of the OIDC app (OGNA core creates "ogna-web"; see `make auth-info`) */
+  clientId?: string;
+  /** Where the identity provider sends users back after login. Defaults to `<origin>/auth/callback` */
+  redirectUri?: string;
+  /** Where users land after logout. Defaults to `<origin>/` */
+  postLogoutRedirectUri?: string;
+  /** Space-separated scopes. Defaults to "openid profile email offline_access" */
+  scopes?: string;
+  /** How to navigate the browser (defaults to `window.location.assign`); useful for tests and native apps */
+  navigate?: (url: string) => void;
+}
+
+export interface RedirectOptions {
+  /** Path or URL to return to after the callback is handled (returned by `handleRedirectCallback`) */
+  returnTo?: string;
+  /** Pre-fill the login name on the identity provider's page */
+  loginHint?: string;
+  /** OIDC `prompt` (e.g. "login", "select_account", "create") */
+  prompt?: string;
+  /** Extra authorization request parameters */
+  extraParams?: Record<string, string>;
+}
+
+export interface CallbackResult {
+  session: Session;
+  /** The `returnTo` passed to `signInWithRedirect`, if any */
+  returnTo: string | null;
+}
+
+export interface LogoutOptions {
+  /** Also end the identity-provider session by redirecting to its logout page. Defaults to true in browsers. */
+  redirect?: boolean;
+  /** Override where the identity provider sends the user after logout */
+  postLogoutRedirectUri?: string;
 }
 
 export type ApiResult<T = unknown> = {
@@ -130,6 +185,10 @@ export interface OgnaClientOptions {
    * Custom fetch implementation (useful for SSR, testing, or custom interceptors).
    */
   fetch?: typeof fetch;
+  /**
+   * OpenID Connect settings for signing users in through the identity provider (Zitadel).
+   */
+  auth?: AuthOptions;
 }
 
 export interface RequestOptions extends RequestInit {
@@ -158,25 +217,139 @@ export function isAuthError(err: unknown): err is AuthError {
  */
 const TOKEN_STORAGE_KEY = "ogna_token";
 const SESSION_STORAGE_KEY = "ogna_session";
+const OIDC_TRANSACTION_KEY = "ogna_oidc_tx";
+const OIDC_TRANSACTION_MAX_AGE_MS = 10 * 60 * 1000;
+const DEFAULT_SCOPES = "openid profile email offline_access";
 const EXPIRY_MARGIN_SECONDS = 30;
 
-function decodeJwtExp(token: string): number | null {
+interface OidcDiscovery {
+  issuer: string;
+  authorization_endpoint: string;
+  token_endpoint: string;
+  userinfo_endpoint?: string;
+  revocation_endpoint?: string;
+  end_session_endpoint?: string;
+}
+
+interface OidcTransaction {
+  state: string;
+  nonce: string;
+  codeVerifier: string;
+  redirectUri: string;
+  returnTo: string | null;
+  createdAt: number;
+}
+
+interface TokenResponse {
+  access_token: string;
+  token_type?: string;
+  expires_in?: number;
+  refresh_token?: string;
+  id_token?: string;
+  scope?: string;
+}
+
+function base64UrlEncode(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return globalThis
+    .btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+function base64UrlDecodeToString(input: string): string {
+  const base64 = input.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), "=");
+  const binary = globalThis.atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+function decodeJwtPayload(token: string): Record<string, unknown> | null {
   try {
     const parts = token.split(".");
-    if (parts.length !== 3) return null;
-    const payloadBase64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-    const padded = payloadBase64.padEnd(
-      payloadBase64.length + ((4 - (payloadBase64.length % 4)) % 4),
-      "="
-    );
-    const jsonPayload =
-      typeof globalThis.atob === "function" ? globalThis.atob(padded) : "";
-    if (!jsonPayload) return null;
-    const parsed = JSON.parse(jsonPayload) as { exp?: unknown };
-    return typeof parsed.exp === "number" ? parsed.exp : null;
+    if (parts.length !== 3 || typeof globalThis.atob !== "function") return null;
+    const parsed = JSON.parse(base64UrlDecodeToString(parts[1]));
+    return typeof parsed === "object" && parsed !== null ? parsed : null;
   } catch {
     return null;
   }
+}
+
+function decodeJwtExp(token: string): number | null {
+  const payload = decodeJwtPayload(token);
+  return payload && typeof payload.exp === "number" ? payload.exp : null;
+}
+
+function getWebCrypto(): Crypto {
+  const c = globalThis.crypto;
+  if (!c || typeof c.getRandomValues !== "function" || !c.subtle) {
+    throw new Error(
+      "OIDC sign-in needs the Web Crypto API (available on https:// pages, localhost, and Node 20+)"
+    );
+  }
+  return c;
+}
+
+function randomUrlSafeString(byteLength: number = 32): string {
+  const bytes = new Uint8Array(byteLength);
+  getWebCrypto().getRandomValues(bytes);
+  return base64UrlEncode(bytes);
+}
+
+async function pkceChallenge(verifier: string): Promise<string> {
+  const digest = await getWebCrypto().subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(verifier)
+  );
+  return base64UrlEncode(new Uint8Array(digest));
+}
+
+function userFromClaims(claims: Record<string, unknown>): User {
+  const str = (key: string): string | undefined =>
+    typeof claims[key] === "string" ? (claims[key] as string) : undefined;
+  const rolesClaim = claims["urn:zitadel:iam:org:project:roles"];
+  const roles =
+    rolesClaim && typeof rolesClaim === "object"
+      ? Object.keys(rolesClaim as Record<string, unknown>).sort()
+      : undefined;
+  return {
+    id: String(claims.sub ?? ""),
+    email: str("email"),
+    email_verified:
+      typeof claims.email_verified === "boolean" ? claims.email_verified : undefined,
+    name: str("name"),
+    given_name: str("given_name"),
+    family_name: str("family_name"),
+    preferred_username: str("preferred_username"),
+    picture: str("picture"),
+    locale: str("locale"),
+    roles,
+    org_id: str("urn:zitadel:iam:user:resourceowner:id"),
+    updated_at: typeof claims.updated_at === "number" ? claims.updated_at : undefined,
+    claims,
+  };
+}
+
+function resolveEnv(...names: string[]): string | undefined {
+  try {
+    const env = (globalThis as { process?: { env?: Record<string, string | undefined> } })
+      .process?.env;
+    if (!env) return undefined;
+    for (const name of names) {
+      if (env[name]) return env[name];
+    }
+  } catch {
+    // Ignore env access errors in restricted runtimes
+  }
+  return undefined;
 }
 
 function computeExpiresAt(session: Session): number {
@@ -200,7 +373,8 @@ function isValidSessionObject(value: unknown): value is Session {
   return (
     typeof candidate.access_token === "string" &&
     candidate.access_token.length > 0 &&
-    typeof candidate.refresh_token === "string"
+    (candidate.refresh_token === undefined ||
+      typeof candidate.refresh_token === "string")
   );
 }
 
@@ -330,6 +504,13 @@ abstract class OgnaModule {
       // Do NOT set Content-Type for FormData; runtime sets multipart boundary
     } else if (typeof Blob !== "undefined" && body instanceof Blob) {
       finalBody = body;
+    } else if (
+      typeof URLSearchParams !== "undefined" &&
+      body instanceof URLSearchParams
+    ) {
+      // OAuth endpoints (token, revoke) take form-encoded bodies
+      headers["Content-Type"] = "application/x-www-form-urlencoded";
+      finalBody = body.toString();
     } else if (body !== undefined && body !== null) {
       if (!headers["Content-Type"] && !headers["content-type"]) {
         headers["Content-Type"] = "application/json";
@@ -390,7 +571,9 @@ abstract class OgnaModule {
           error: {
             code: errorData.code ?? res.status,
             status: res.status,
-            error_code: errorData.error_code,
+            error_code:
+              errorData.error_code ??
+              (typeof errorData.error === "string" ? errorData.error : undefined),
             msg: message,
             details: errorData.details,
             request_id: errorData.request_id,
@@ -444,6 +627,8 @@ export class AuthClient extends OgnaModule {
   private _session: Session | null = null;
   private _refreshPromise: Promise<ApiResult<Session>> | null = null;
   private _listeners: Set<AuthChangeCallback> = new Set();
+  private _discovery: Promise<OidcDiscovery> | null = null;
+  private _memoryTransaction: string | null = null;
 
   constructor(root: OgnaClient) {
     super(root);
@@ -670,42 +855,303 @@ export class AuthClient extends OgnaModule {
     }
   }
 
-  async login(email: string, password: string): Promise<ApiResult<Session>> {
-    const result = await this.request<Session>(
-      "POST",
-      `${this.root.baseUrl}/auth/token?grant_type=password`,
-      { email, password },
-      { skipAuth: true }
-    );
-    if (result.data) {
-      this.persistSession(result.data);
-      this.notifyListeners("SIGNED_IN", this._session);
-    }
-    return result;
+  // ---------------------------------------------------------------------------
+  // OpenID Connect (Authorization Code + PKCE) against the identity provider
+  // ---------------------------------------------------------------------------
+
+  private get authOptions(): AuthOptions {
+    return this.root.options.auth ?? {};
   }
 
-  async signup(
-    email: string,
-    password: string,
-    data?: Record<string, unknown>
-  ): Promise<ApiResult<Session>> {
-    const payload = data ? { email, password, data } : { email, password };
-    const result = await this.request<Session>(
-      "POST",
-      `${this.root.baseUrl}/auth/signup`,
-      payload,
-      { skipAuth: true }
-    );
-    if (result.data && result.data.access_token) {
-      this.persistSession(result.data);
-      this.notifyListeners("SIGNED_IN", this._session);
+  private get issuer(): string {
+    const issuer =
+      this.authOptions.issuer ||
+      resolveEnv(
+        "NEXT_PUBLIC_OGNA_AUTH_URL",
+        "VITE_OGNA_AUTH_URL",
+        "REACT_APP_OGNA_AUTH_URL",
+        "OGNA_AUTH_URL"
+      );
+    if (!issuer) {
+      throw new Error(
+        "OgnaClient: set options.auth.issuer to your identity provider URL (e.g. http://auth.localhost:8000)"
+      );
     }
-    return result;
+    const stripped = issuer.trim().replace(/\/+$/, "");
+    if (!/^https?:\/\//i.test(stripped)) {
+      throw new Error(`OgnaClient: invalid auth issuer "${issuer}"`);
+    }
+    return stripped;
+  }
+
+  private get clientId(): string {
+    const clientId =
+      this.authOptions.clientId ||
+      resolveEnv(
+        "NEXT_PUBLIC_OGNA_CLIENT_ID",
+        "VITE_OGNA_CLIENT_ID",
+        "REACT_APP_OGNA_CLIENT_ID",
+        "OGNA_CLIENT_ID"
+      );
+    if (!clientId) {
+      throw new Error(
+        "OgnaClient: set options.auth.clientId (run `make auth-info` in ogna core to see it)"
+      );
+    }
+    return clientId;
+  }
+
+  private browserOrigin(): string {
+    if (typeof window !== "undefined" && window.location?.origin) {
+      return window.location.origin;
+    }
+    return this.root.baseUrl;
+  }
+
+  private get redirectUri(): string {
+    return this.authOptions.redirectUri ?? `${this.browserOrigin()}/auth/callback`;
+  }
+
+  private get postLogoutRedirectUri(): string {
+    return this.authOptions.postLogoutRedirectUri ?? `${this.browserOrigin()}/`;
+  }
+
+  private navigate(url: string): void {
+    if (this.authOptions.navigate) {
+      this.authOptions.navigate(url);
+      return;
+    }
+    if (typeof window !== "undefined" && window.location) {
+      window.location.assign(url);
+      return;
+    }
+    throw new Error("OgnaClient: no browser available; pass options.auth.navigate");
+  }
+
+  /** Fetches (once) and caches the identity provider's OIDC discovery document. */
+  async getDiscovery(): Promise<OidcDiscovery> {
+    if (!this._discovery) {
+      const issuer = this.issuer;
+      const fetchFn = this.root.options.fetch ?? fetch;
+      this._discovery = (async () => {
+        const res = await fetchFn(`${issuer}/.well-known/openid-configuration`, {
+          headers: { Accept: "application/json" },
+        });
+        if (!res.ok) {
+          throw new Error(`OIDC discovery failed: HTTP ${res.status}`);
+        }
+        const doc = (await res.json()) as OidcDiscovery;
+        if (!doc || doc.issuer?.replace(/\/+$/, "") !== issuer) {
+          throw new Error(
+            `OIDC discovery issuer mismatch: expected ${issuer}, got ${doc?.issuer}`
+          );
+        }
+        if (!doc.authorization_endpoint || !doc.token_endpoint) {
+          throw new Error("OIDC discovery document is missing required endpoints");
+        }
+        return doc;
+      })();
+      this._discovery.catch(() => {
+        this._discovery = null;
+      });
+    }
+    return this._discovery;
+  }
+
+  private saveTransaction(tx: OidcTransaction): void {
+    const raw = JSON.stringify(tx);
+    this._memoryTransaction = raw;
+    try {
+      if (typeof window !== "undefined" && window.sessionStorage) {
+        window.sessionStorage.setItem(OIDC_TRANSACTION_KEY, raw);
+      }
+    } catch {
+      // sessionStorage unavailable; in-memory copy is used (same page only)
+    }
+  }
+
+  private takeTransaction(): OidcTransaction | null {
+    let raw: string | null = null;
+    try {
+      if (typeof window !== "undefined" && window.sessionStorage) {
+        raw = window.sessionStorage.getItem(OIDC_TRANSACTION_KEY);
+        window.sessionStorage.removeItem(OIDC_TRANSACTION_KEY);
+      }
+    } catch {
+      // ignore
+    }
+    raw = raw ?? this._memoryTransaction;
+    this._memoryTransaction = null;
+    if (!raw) return null;
+    try {
+      const tx = JSON.parse(raw) as OidcTransaction;
+      if (Date.now() - tx.createdAt > OIDC_TRANSACTION_MAX_AGE_MS) return null;
+      return tx;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Builds the authorization URL (and stores the PKCE/state values needed by
+   * `handleRedirectCallback`) without navigating. Most apps use `signInWithRedirect`.
+   */
+  async getAuthorizationUrl(options: RedirectOptions = {}): Promise<string> {
+    const discovery = await this.getDiscovery();
+    const codeVerifier = randomUrlSafeString(32);
+    const tx: OidcTransaction = {
+      state: randomUrlSafeString(16),
+      nonce: randomUrlSafeString(16),
+      codeVerifier,
+      redirectUri: this.redirectUri,
+      returnTo: options.returnTo ?? null,
+      createdAt: Date.now(),
+    };
+    const params = new URLSearchParams({
+      client_id: this.clientId,
+      redirect_uri: tx.redirectUri,
+      response_type: "code",
+      scope: this.authOptions.scopes ?? DEFAULT_SCOPES,
+      state: tx.state,
+      nonce: tx.nonce,
+      code_challenge: await pkceChallenge(codeVerifier),
+      code_challenge_method: "S256",
+    });
+    if (options.prompt) params.set("prompt", options.prompt);
+    if (options.loginHint) params.set("login_hint", options.loginHint);
+    for (const [key, value] of Object.entries(options.extraParams ?? {})) {
+      params.set(key, value);
+    }
+    this.saveTransaction(tx);
+    const separator = discovery.authorization_endpoint.includes("?") ? "&" : "?";
+    return `${discovery.authorization_endpoint}${separator}${params.toString()}`;
+  }
+
+  /** Sends the user to the identity provider's login page. */
+  async signInWithRedirect(options: RedirectOptions = {}): Promise<void> {
+    this.navigate(await this.getAuthorizationUrl(options));
+  }
+
+  /** Sends the user to the identity provider's registration page (`prompt=create`). */
+  async signUpWithRedirect(options: RedirectOptions = {}): Promise<void> {
+    this.navigate(await this.getAuthorizationUrl({ prompt: "create", ...options }));
+  }
+
+  /** True if `url` (default: current location) is an OIDC callback with a code or an error. */
+  isRedirectCallback(url?: string): boolean {
+    const target =
+      url ?? (typeof window !== "undefined" ? window.location?.href : undefined);
+    if (!target) return false;
+    try {
+      const params = new URL(target).searchParams;
+      return params.has("state") && (params.has("code") || params.has("error"));
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Completes sign-in on the redirect URI: verifies `state`, exchanges the code
+   * (with the PKCE verifier) for tokens, checks the ID token nonce, and stores the session.
+   */
+  async handleRedirectCallback(url?: string): Promise<ApiResult<CallbackResult>> {
+    const target =
+      url ?? (typeof window !== "undefined" ? window.location?.href : undefined);
+    if (!target) {
+      return { data: null, error: { msg: "No callback URL to handle" } };
+    }
+
+    let params: URLSearchParams;
+    try {
+      params = new URL(target).searchParams;
+    } catch {
+      return { data: null, error: { msg: "Invalid callback URL" } };
+    }
+
+    const tx = this.takeTransaction();
+    const fail = (msg: string, error_code: string): ApiResult<CallbackResult> => ({
+      data: null,
+      error: { msg, error_code },
+    });
+
+    if (params.get("error")) {
+      return fail(
+        params.get("error_description") || params.get("error") || "Sign-in failed",
+        params.get("error") || "oidc_error"
+      );
+    }
+    if (!tx) {
+      return fail("No sign-in in progress (or it expired); start again", "missing_transaction");
+    }
+    if (params.get("state") !== tx.state) {
+      return fail("State mismatch; possible CSRF, sign-in aborted", "state_mismatch");
+    }
+    const code = params.get("code");
+    if (!code) {
+      return fail("Callback is missing the authorization code", "missing_code");
+    }
+
+    let discovery: OidcDiscovery;
+    try {
+      discovery = await this.getDiscovery();
+    } catch (err) {
+      return fail(err instanceof Error ? err.message : "OIDC discovery failed", "discovery_failed");
+    }
+
+    const tokens = await this.request<TokenResponse>(
+      "POST",
+      discovery.token_endpoint,
+      new URLSearchParams({
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: tx.redirectUri,
+        client_id: this.clientId,
+        code_verifier: tx.codeVerifier,
+      }),
+      { skipAuth: true, _isRetry: true }
+    );
+    if (!tokens.data) {
+      return { data: null, error: tokens.error };
+    }
+
+    let user: User | null = null;
+    if (tokens.data.id_token) {
+      const claims = decodeJwtPayload(tokens.data.id_token);
+      if (!claims || claims.nonce !== tx.nonce) {
+        return fail("ID token nonce mismatch; sign-in aborted", "nonce_mismatch");
+      }
+      user = userFromClaims(claims);
+    }
+
+    const session = this.sessionFromTokens(tokens.data, user ?? { id: "" });
+    this.persistSession(session);
+    if (!user) {
+      await this.fetchUser();
+    }
+    this.notifyListeners("SIGNED_IN", this._session);
+    return {
+      data: { session: this._session as Session, returnTo: tx.returnTo },
+      error: null,
+    };
+  }
+
+  private sessionFromTokens(tokens: TokenResponse, user: User, previous?: Session | null): Session {
+    return {
+      access_token: tokens.access_token,
+      // Refresh tokens may or may not be rotated; keep the old one if none is returned
+      refresh_token: tokens.refresh_token ?? previous?.refresh_token,
+      id_token: tokens.id_token ?? previous?.id_token,
+      expires_in: typeof tokens.expires_in === "number" ? tokens.expires_in : 3600,
+      expires_at: undefined,
+      token_type: tokens.token_type ?? "Bearer",
+      scope: tokens.scope ?? previous?.scope,
+      user,
+    };
   }
 
   /**
    * Refreshes the current session using the stored `refresh_token`.
-   * Concurrent calls share a single in-flight request to avoid GoTrue token rotation race conditions.
+   * Concurrent calls share a single in-flight request so a rotated refresh token is never reused.
    */
   async refreshSession(refreshToken?: string): Promise<ApiResult<Session>> {
     if (this._refreshPromise) {
@@ -722,17 +1168,43 @@ export class AuthClient extends OgnaModule {
 
     this._refreshPromise = (async () => {
       try {
-        const result = await this.request<Session>(
+        let discovery: OidcDiscovery;
+        try {
+          discovery = await this.getDiscovery();
+        } catch (err) {
+          return {
+            data: null,
+            error: {
+              msg: err instanceof Error ? err.message : "OIDC discovery failed",
+              error_code: "discovery_failed",
+            },
+          };
+        }
+
+        const result = await this.request<TokenResponse>(
           "POST",
-          `${this.root.baseUrl}/auth/token?grant_type=refresh_token`,
-          { refresh_token: tokenToUse },
+          discovery.token_endpoint,
+          new URLSearchParams({
+            grant_type: "refresh_token",
+            refresh_token: tokenToUse,
+            client_id: this.clientId,
+          }),
           { skipAuth: true, _isRetry: true }
         );
 
         if (result.data && result.data.access_token) {
-          this.persistSession(result.data);
+          const previous = this._session;
+          let user = previous?.user ?? { id: "" };
+          if (result.data.id_token) {
+            const claims = decodeJwtPayload(result.data.id_token);
+            if (claims) user = userFromClaims(claims);
+          }
+          this.persistSession(this.sessionFromTokens(result.data, user, previous));
           this.notifyListeners("TOKEN_REFRESHED", this._session);
-        } else if (
+          return { data: this._session as Session, error: null };
+        }
+
+        if (
           result.error &&
           (result.error.status === 400 ||
             result.error.status === 401 ||
@@ -741,7 +1213,7 @@ export class AuthClient extends OgnaModule {
           this.clearPersistedSession();
           this.notifyListeners("SIGNED_OUT", null);
         }
-        return result;
+        return { data: null, error: result.error };
       } finally {
         this._refreshPromise = null;
       }
@@ -751,34 +1223,95 @@ export class AuthClient extends OgnaModule {
   }
 
   /**
-   * Fetches the authenticated user directly from GoTrue (`GET /auth/user`)
-   * and updates the stored session user if active.
+   * Fetches the signed-in user's claims from the identity provider's userinfo
+   * endpoint and updates the stored session user.
    */
   async fetchUser(): Promise<ApiResult<User>> {
-    const result = await this.request<User>(
+    if (!this._session?.access_token) {
+      return { data: null, error: { msg: "Not signed in", code: 401, status: 401 } };
+    }
+    let discovery: OidcDiscovery;
+    try {
+      discovery = await this.getDiscovery();
+    } catch (err) {
+      return {
+        data: null,
+        error: { msg: err instanceof Error ? err.message : "OIDC discovery failed" },
+      };
+    }
+    if (!discovery.userinfo_endpoint) {
+      return { data: null, error: { msg: "Identity provider has no userinfo endpoint" } };
+    }
+    const result = await this.request<Record<string, unknown>>(
       "GET",
-      `${this.root.baseUrl}/auth/user`
+      discovery.userinfo_endpoint,
+      undefined,
+      {
+        skipAuth: true,
+        _isRetry: true,
+        headers: { Authorization: `Bearer ${this._session.access_token}` },
+      }
     );
-    if (result.data && this._session) {
-      this.persistSession({
-        ...this._session,
-        user: result.data,
-      });
+    if (!result.data) {
+      return { data: null, error: result.error };
+    }
+    const user = userFromClaims(result.data);
+    if (this._session) {
+      this.persistSession({ ...this._session, user });
       this.notifyListeners("USER_UPDATED", this._session);
     }
-    return result;
+    return { data: user, error: null };
   }
 
-  async logout(): Promise<ApiResult<Record<string, never>>> {
-    const result = await this.request<Record<string, never>>(
-      "POST",
-      `${this.root.baseUrl}/auth/logout`,
-      undefined,
-      { _isRetry: true }
-    );
+  /**
+   * Signs out: revokes the refresh and access tokens, clears the local session and,
+   * by default in browsers, redirects to the identity provider to end its session too.
+   */
+  async logout(options: LogoutOptions = {}): Promise<ApiResult<Record<string, never>>> {
+    const session = this._session;
+    let error: AuthError | null = null;
+    let endSessionUrl: string | null = null;
+
+    if (session) {
+      try {
+        const discovery = await this.getDiscovery();
+        if (discovery.revocation_endpoint) {
+          const revoke = (token: string, hint: string) =>
+            this.request<Record<string, never>>(
+              "POST",
+              discovery.revocation_endpoint as string,
+              new URLSearchParams({ token, token_type_hint: hint, client_id: this.clientId }),
+              { skipAuth: true, _isRetry: true }
+            );
+          const results = await Promise.all([
+            session.refresh_token ? revoke(session.refresh_token, "refresh_token") : null,
+            revoke(session.access_token, "access_token"),
+          ]);
+          error = results.find((r) => r?.error)?.error ?? null;
+        }
+        if (discovery.end_session_endpoint) {
+          const params = new URLSearchParams({
+            client_id: this.clientId,
+            post_logout_redirect_uri:
+              options.postLogoutRedirectUri ?? this.postLogoutRedirectUri,
+          });
+          if (session.id_token) params.set("id_token_hint", session.id_token);
+          endSessionUrl = `${discovery.end_session_endpoint}?${params.toString()}`;
+        }
+      } catch (err) {
+        error = { msg: err instanceof Error ? err.message : "Logout failed" };
+      }
+    }
+
     this.clearPersistedSession();
     this.notifyListeners("SIGNED_OUT", null);
-    return result;
+
+    const shouldRedirect =
+      options.redirect ?? (typeof window !== "undefined" || Boolean(this.authOptions.navigate));
+    if (shouldRedirect && endSessionUrl) {
+      this.navigate(endSessionUrl);
+    }
+    return error ? { data: null, error } : { data: {}, error: null };
   }
 
   /**
