@@ -21,5 +21,9 @@ export type {
   AuthChangeCallback,
   CookieOptions,
   OgnaClientOptions,
+  AuthOptions,
+  RedirectOptions,
+  CallbackResult,
+  LogoutOptions,
   RequestOptions,
 } from "./OgnaClient";
